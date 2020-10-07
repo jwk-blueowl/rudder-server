@@ -58,6 +58,8 @@ var (
 	routerLoaded                     bool
 	processorLoaded                  bool
 	enableSuppressUserFeature        bool
+	serviceSplit                     bool
+	serviceType                      string
 )
 
 var version = "Not an official release. Get the latest release from the github repo."
@@ -74,6 +76,8 @@ func loadConfig() {
 	warehouseMode = config.GetString("Warehouse.mode", "embedded")
 	// Enable suppress user feature. false by default
 	enableSuppressUserFeature = config.GetBool("Gateway.enableSuppressUserFeature", false)
+	serviceSplit = config.GetEnvAsBool("SERVICE_SPLIT", false)
+	serviceType = config.GetEnv("SERVICE_TYPE", "")
 }
 
 // Test Function
@@ -149,6 +153,106 @@ func printVersion() {
 
 func startWarehouseService() {
 	warehouse.Start()
+}
+
+func startRudderCoreProcessor(clearDB *bool, normalMode bool, degradedMode bool) {
+	logger.Info("Main starting")
+
+	if !validators.ValidateEnv() {
+		panic(errors.New("Failed to start rudder-server"))
+	}
+	validators.InitializeEnv()
+
+	// Check if there is a probable inconsistent state of Data
+	if diagnostics.EnableServerStartMetric {
+		diagnostics.Track(diagnostics.ServerStart, map[string]interface{}{
+			diagnostics.ServerStart: fmt.Sprint(time.Unix(misc.AppStartTime, 0)),
+		})
+	}
+
+	//Reload Config
+	loadConfig()
+
+	var gatewayDB jobsdb.HandleT
+	var routerDB jobsdb.HandleT
+	var batchRouterDB jobsdb.HandleT
+	var procErrorDB jobsdb.HandleT
+
+	runtime.GOMAXPROCS(maxProcess)
+	logger.Info("Clearing DB ", *clearDB)
+
+	destinationdebugger.Setup()
+
+	migrationMode := application.Options().MigrationMode
+	gatewayDB.Setup(*clearDB, "gw", gwDBRetention, migrationMode, false)
+	routerDB.Setup(*clearDB, "rt", routerDBRetention, migrationMode, true)
+	batchRouterDB.Setup(*clearDB, "batch_rt", routerDBRetention, migrationMode, true)
+	procErrorDB.Setup(*clearDB, "proc_error", routerDBRetention, migrationMode, false)
+
+	if application.Features().Migrator != nil {
+		if migrationMode == db.IMPORT || migrationMode == db.EXPORT || migrationMode == db.IMPORT_EXPORT {
+			startRouterFunc := func() {
+				StartRouter(enableRouter, &routerDB, &batchRouterDB)
+			}
+			startProcessorFunc := func() {
+				StartProcessor(enableProcessor, &gatewayDB, &routerDB, &batchRouterDB, &procErrorDB)
+			}
+			enableRouter = false
+			enableProcessor = false
+			application.Features().Migrator.Setup(&gatewayDB, &routerDB, &batchRouterDB, startProcessorFunc, startRouterFunc)
+		}
+	}
+
+	StartRouter(enableRouter, &routerDB, &batchRouterDB)
+	StartProcessor(enableProcessor, &gatewayDB, &routerDB, &batchRouterDB, &procErrorDB)
+	//go readIOforResume(router) //keeping it as input from IO, to be replaced by UI
+}
+
+func startRudderCoreGateway(clearDB *bool, normalMode bool, degradedMode bool) {
+	logger.Info("Main starting")
+
+	if !validators.ValidateEnv() {
+		panic(errors.New("Failed to start rudder-server"))
+	}
+	validators.InitializeEnv()
+
+	// Check if there is a probable inconsistent state of Data
+	if diagnostics.EnableServerStartMetric {
+		diagnostics.Track(diagnostics.ServerStart, map[string]interface{}{
+			diagnostics.ServerStart: fmt.Sprint(time.Unix(misc.AppStartTime, 0)),
+		})
+	}
+
+	//Reload Config
+	loadConfig()
+
+	var gatewayDB jobsdb.HandleT
+
+	runtime.GOMAXPROCS(maxProcess)
+	logger.Info("Clearing DB ", *clearDB)
+
+	sourcedebugger.Setup()
+
+	migrationMode := application.Options().MigrationMode
+	gatewayDB.Setup(*clearDB, "gw", gwDBRetention, migrationMode, false)
+
+	enableGateway := true
+
+	if application.Features().Migrator != nil {
+		if migrationMode == db.IMPORT || migrationMode == db.EXPORT || migrationMode == db.IMPORT_EXPORT {
+			enableGateway = (migrationMode != db.EXPORT)
+		}
+	}
+
+	if enableGateway {
+		var gateway gateway.HandleT
+		var rateLimiter ratelimiter.HandleT
+
+		rateLimiter.SetUp()
+		gateway.Setup(application, backendconfig.DefaultBackendConfig, &gatewayDB, &rateLimiter, stats.DefaultStats, clearDB, versionHandler)
+		gateway.StartWebHandler()
+	}
+	//go readIOforResume(router) //keeping it as input from IO, to be replaced by UI
 }
 
 func startRudderCore(clearDB *bool, normalMode bool, degradedMode bool) {
@@ -333,19 +437,41 @@ func main() {
 
 	misc.AppStartTime = time.Now().Unix()
 	if canStartServer() {
-		db.HandleRecovery(options.NormalMode, options.DegradedMode, options.MigrationMode, misc.AppStartTime)
+		if serviceSplit {
+			if serviceType != "GATEWAY" && serviceType != "PROCESSOR" {
+				panic(errors.New("Not a valid service type. Allowed are GATEWAY or PROCESSOR"))
+			}
 
-		rruntime.Go(func() {
-			startRudderCore(&options.ClearDB, options.NormalMode, options.DegradedMode)
-		})
+			if serviceType == "GATEWAY" {
+				db.HandleOnlyGatewayRecovery(options.MigrationMode, misc.AppStartTime)
+
+				rruntime.Go(func() {
+					startRudderCoreGateway(&options.ClearDB, options.NormalMode, options.DegradedMode)
+				})
+			} else if serviceType == "PROCESSOR" {
+				db.HandleOnlyProcessorRecovery(options.MigrationMode, misc.AppStartTime)
+
+				rruntime.Go(func() {
+					startRudderCoreProcessor(&options.ClearDB, options.NormalMode, options.DegradedMode)
+				})
+			}
+		} else {
+			db.HandleRecovery(options.NormalMode, options.DegradedMode, options.MigrationMode, misc.AppStartTime)
+
+			rruntime.Go(func() {
+				startRudderCore(&options.ClearDB, options.NormalMode, options.DegradedMode)
+			})
+		}
 	}
 
-	// initialize warehouse service after core to handle non-normal recovery modes
+	//TODO: Handle warehouse later
+	/*// initialize warehouse service after core to handle non-normal recovery modes
 	if canStartWarehouse() {
 		rruntime.Go(func() {
 			startWarehouseService()
 		})
 	}
+	*/
 
 	rruntime.Go(admin.StartServer)
 

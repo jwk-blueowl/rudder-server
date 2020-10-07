@@ -236,6 +236,8 @@ maxRegulationsPerRequest = 1000
 enabled = true
 errorStorePath = "/tmp/error_store.json"
 storagePath = "/tmp/recovery_data.json"
+storagePathGateway = "/tmp/recovery_data_gateway.json"
+storagePathProcessor = "/tmp/recovery_data_processor.json"
     [recovery.normal]
     crashThreshold = 5
     durationInS = 300
