@@ -16,24 +16,16 @@ import (
 
 	"github.com/bugsnag/bugsnag-go"
 
-	"github.com/rudderlabs/rudder-server/services/diagnostics"
-
 	"github.com/rudderlabs/rudder-server/admin"
 	"github.com/rudderlabs/rudder-server/app"
 	"github.com/rudderlabs/rudder-server/config"
 	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
-	"github.com/rudderlabs/rudder-server/gateway"
 	"github.com/rudderlabs/rudder-server/jobsdb"
 	"github.com/rudderlabs/rudder-server/processor"
-	ratelimiter "github.com/rudderlabs/rudder-server/rate-limiter"
 	"github.com/rudderlabs/rudder-server/router"
 	"github.com/rudderlabs/rudder-server/router/batchrouter"
 	"github.com/rudderlabs/rudder-server/rruntime"
-	"github.com/rudderlabs/rudder-server/services/db"
-	destinationdebugger "github.com/rudderlabs/rudder-server/services/destination-debugger"
-	sourcedebugger "github.com/rudderlabs/rudder-server/services/source-debugger"
 	"github.com/rudderlabs/rudder-server/services/stats"
-	"github.com/rudderlabs/rudder-server/services/validators"
 	"github.com/rudderlabs/rudder-server/utils"
 	"github.com/rudderlabs/rudder-server/utils/logger"
 	"github.com/rudderlabs/rudder-server/utils/misc"
@@ -58,12 +50,37 @@ var (
 	routerLoaded                     bool
 	processorLoaded                  bool
 	enableSuppressUserFeature        bool
-	serviceSplit                     bool
-	serviceType                      string
+	appType                          AppTypeHandler
 )
 
 var version = "Not an official release. Get the latest release from the github repo."
 var major, minor, commit, buildDate, builtBy, gitURL, patch string
+
+const (
+	gatewayAppType   = "GATEWAY"
+	processorAppType = "PROCESSOR"
+	monolithAppType  = "MONOLITH"
+)
+
+//AppTypeHandler to be implemented by different app type objects.
+type AppTypeHandler interface {
+	GetAppType() string
+	HandleRecovery(*app.Options)
+	StartRudderCore(*app.Options)
+}
+
+func getAppType(appType string) AppTypeHandler {
+	switch appType {
+	case gatewayAppType:
+		return &GatewayAppType{}
+	case processorAppType:
+		return &ProcessorAppType{}
+	case monolithAppType:
+		return &MonolithAppType{}
+	}
+
+	panic(errors.New("invalid app type"))
+}
 
 func loadConfig() {
 	maxProcess = config.GetInt("maxProcess", 12)
@@ -76,8 +93,6 @@ func loadConfig() {
 	warehouseMode = config.GetString("Warehouse.mode", "embedded")
 	// Enable suppress user feature. false by default
 	enableSuppressUserFeature = config.GetBool("Gateway.enableSuppressUserFeature", false)
-	serviceSplit = config.GetEnvAsBool("SERVICE_SPLIT", false)
-	serviceType = config.GetEnv("SERVICE_TYPE", "")
 }
 
 // Test Function
@@ -155,172 +170,6 @@ func startWarehouseService() {
 	warehouse.Start()
 }
 
-func startRudderCoreProcessor(clearDB *bool, normalMode bool, degradedMode bool) {
-	logger.Info("Main starting")
-
-	if !validators.ValidateEnv() {
-		panic(errors.New("Failed to start rudder-server"))
-	}
-	validators.InitializeEnv()
-
-	// Check if there is a probable inconsistent state of Data
-	if diagnostics.EnableServerStartMetric {
-		diagnostics.Track(diagnostics.ServerStart, map[string]interface{}{
-			diagnostics.ServerStart: fmt.Sprint(time.Unix(misc.AppStartTime, 0)),
-		})
-	}
-
-	//Reload Config
-	loadConfig()
-
-	var gatewayDB jobsdb.HandleT
-	var routerDB jobsdb.HandleT
-	var batchRouterDB jobsdb.HandleT
-	var procErrorDB jobsdb.HandleT
-
-	runtime.GOMAXPROCS(maxProcess)
-	logger.Info("Clearing DB ", *clearDB)
-
-	destinationdebugger.Setup()
-
-	migrationMode := application.Options().MigrationMode
-	gatewayDB.Setup(*clearDB, "gw", gwDBRetention, migrationMode, false)
-	routerDB.Setup(*clearDB, "rt", routerDBRetention, migrationMode, true)
-	batchRouterDB.Setup(*clearDB, "batch_rt", routerDBRetention, migrationMode, true)
-	procErrorDB.Setup(*clearDB, "proc_error", routerDBRetention, migrationMode, false)
-
-	if application.Features().Migrator != nil {
-		if migrationMode == db.IMPORT || migrationMode == db.EXPORT || migrationMode == db.IMPORT_EXPORT {
-			startRouterFunc := func() {
-				StartRouter(enableRouter, &routerDB, &batchRouterDB)
-			}
-			startProcessorFunc := func() {
-				StartProcessor(enableProcessor, &gatewayDB, &routerDB, &batchRouterDB, &procErrorDB)
-			}
-			enableRouter = false
-			enableProcessor = false
-			application.Features().Migrator.Setup(&gatewayDB, &routerDB, &batchRouterDB, startProcessorFunc, startRouterFunc)
-		}
-	}
-
-	StartRouter(enableRouter, &routerDB, &batchRouterDB)
-	StartProcessor(enableProcessor, &gatewayDB, &routerDB, &batchRouterDB, &procErrorDB)
-	//go readIOforResume(router) //keeping it as input from IO, to be replaced by UI
-}
-
-func startRudderCoreGateway(clearDB *bool, normalMode bool, degradedMode bool) {
-	logger.Info("Main starting")
-
-	if !validators.ValidateEnv() {
-		panic(errors.New("Failed to start rudder-server"))
-	}
-	validators.InitializeEnv()
-
-	// Check if there is a probable inconsistent state of Data
-	if diagnostics.EnableServerStartMetric {
-		diagnostics.Track(diagnostics.ServerStart, map[string]interface{}{
-			diagnostics.ServerStart: fmt.Sprint(time.Unix(misc.AppStartTime, 0)),
-		})
-	}
-
-	//Reload Config
-	loadConfig()
-
-	var gatewayDB jobsdb.HandleT
-
-	runtime.GOMAXPROCS(maxProcess)
-	logger.Info("Clearing DB ", *clearDB)
-
-	sourcedebugger.Setup()
-
-	migrationMode := application.Options().MigrationMode
-	gatewayDB.Setup(*clearDB, "gw", gwDBRetention, migrationMode, false)
-
-	enableGateway := true
-
-	if application.Features().Migrator != nil {
-		if migrationMode == db.IMPORT || migrationMode == db.EXPORT || migrationMode == db.IMPORT_EXPORT {
-			enableGateway = (migrationMode != db.EXPORT)
-		}
-	}
-
-	if enableGateway {
-		var gateway gateway.HandleT
-		var rateLimiter ratelimiter.HandleT
-
-		rateLimiter.SetUp()
-		gateway.Setup(application, backendconfig.DefaultBackendConfig, &gatewayDB, &rateLimiter, stats.DefaultStats, clearDB, versionHandler)
-		gateway.StartWebHandler()
-	}
-	//go readIOforResume(router) //keeping it as input from IO, to be replaced by UI
-}
-
-func startRudderCore(clearDB *bool, normalMode bool, degradedMode bool) {
-	logger.Info("Main starting")
-
-	if !validators.ValidateEnv() {
-		panic(errors.New("Failed to start rudder-server"))
-	}
-	validators.InitializeEnv()
-
-	// Check if there is a probable inconsistent state of Data
-	if diagnostics.EnableServerStartMetric {
-		diagnostics.Track(diagnostics.ServerStart, map[string]interface{}{
-			diagnostics.ServerStart: fmt.Sprint(time.Unix(misc.AppStartTime, 0)),
-		})
-	}
-
-	//Reload Config
-	loadConfig()
-
-	var gatewayDB jobsdb.HandleT
-	var routerDB jobsdb.HandleT
-	var batchRouterDB jobsdb.HandleT
-	var procErrorDB jobsdb.HandleT
-
-	runtime.GOMAXPROCS(maxProcess)
-	logger.Info("Clearing DB ", *clearDB)
-
-	destinationdebugger.Setup()
-	sourcedebugger.Setup()
-
-	migrationMode := application.Options().MigrationMode
-	gatewayDB.Setup(*clearDB, "gw", gwDBRetention, migrationMode, false)
-	routerDB.Setup(*clearDB, "rt", routerDBRetention, migrationMode, true)
-	batchRouterDB.Setup(*clearDB, "batch_rt", routerDBRetention, migrationMode, true)
-	procErrorDB.Setup(*clearDB, "proc_error", routerDBRetention, migrationMode, false)
-
-	enableGateway := true
-
-	if application.Features().Migrator != nil {
-		if migrationMode == db.IMPORT || migrationMode == db.EXPORT || migrationMode == db.IMPORT_EXPORT {
-			startRouterFunc := func() {
-				StartRouter(enableRouter, &routerDB, &batchRouterDB)
-			}
-			startProcessorFunc := func() {
-				StartProcessor(enableProcessor, &gatewayDB, &routerDB, &batchRouterDB, &procErrorDB)
-			}
-			enableRouter = false
-			enableProcessor = false
-			enableGateway = (migrationMode != db.EXPORT)
-			application.Features().Migrator.Setup(&gatewayDB, &routerDB, &batchRouterDB, startProcessorFunc, startRouterFunc)
-		}
-	}
-
-	StartRouter(enableRouter, &routerDB, &batchRouterDB)
-	StartProcessor(enableProcessor, &gatewayDB, &routerDB, &batchRouterDB, &procErrorDB)
-
-	if enableGateway {
-		var gateway gateway.HandleT
-		var rateLimiter ratelimiter.HandleT
-
-		rateLimiter.SetUp()
-		gateway.Setup(application, backendconfig.DefaultBackendConfig, &gatewayDB, &rateLimiter, stats.DefaultStats, clearDB, versionHandler)
-		gateway.StartWebHandler()
-	}
-	//go readIOforResume(router) //keeping it as input from IO, to be replaced by UI
-}
-
 //StartRouter atomically starts router process if not already started
 func StartRouter(enableRouter bool, routerDB, batchRouterDB *jobsdb.HandleT) {
 	moduleLoadLock.Lock()
@@ -363,6 +212,8 @@ func canStartWarehouse() bool {
 }
 
 func main() {
+	appType = getAppType(config.GetEnv("APP_TYPE", ""))
+
 	version := versionInfo()
 
 	bugsnag.Configure(bugsnag.Configuration{
@@ -371,7 +222,7 @@ func main() {
 		// The import paths for the Go packages containing your source files
 		ProjectPackages: []string{"main", "github.com/rudderlabs/rudder-server"},
 		// more configuration options
-		AppType:      "rudder-server",
+		AppType:      appType.GetAppType(),
 		AppVersion:   version["Version"].(string),
 		PanicHandler: func() {},
 	})
@@ -437,31 +288,10 @@ func main() {
 
 	misc.AppStartTime = time.Now().Unix()
 	if canStartServer() {
-		if serviceSplit {
-			if serviceType != "GATEWAY" && serviceType != "PROCESSOR" {
-				panic(errors.New("Not a valid service type. Allowed are GATEWAY or PROCESSOR"))
-			}
-
-			if serviceType == "GATEWAY" {
-				db.HandleOnlyGatewayRecovery(options.MigrationMode, misc.AppStartTime)
-
-				rruntime.Go(func() {
-					startRudderCoreGateway(&options.ClearDB, options.NormalMode, options.DegradedMode)
-				})
-			} else if serviceType == "PROCESSOR" {
-				db.HandleOnlyProcessorRecovery(options.MigrationMode, misc.AppStartTime)
-
-				rruntime.Go(func() {
-					startRudderCoreProcessor(&options.ClearDB, options.NormalMode, options.DegradedMode)
-				})
-			}
-		} else {
-			db.HandleRecovery(options.NormalMode, options.DegradedMode, options.MigrationMode, misc.AppStartTime)
-
-			rruntime.Go(func() {
-				startRudderCore(&options.ClearDB, options.NormalMode, options.DegradedMode)
-			})
-		}
+		appType.HandleRecovery(options)
+		rruntime.Go(func() {
+			appType.StartRudderCore(options)
+		})
 	}
 
 	//TODO: Handle warehouse later

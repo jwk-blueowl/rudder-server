@@ -8,7 +8,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/rudderlabs/rudder-server/rruntime"
 	"github.com/rudderlabs/rudder-server/services/alert"
 	"github.com/rudderlabs/rudder-server/services/stats"
 
@@ -17,9 +16,9 @@ import (
 )
 
 const (
-	normalMode    = "normal"
-	degradedMode  = "degraded"
-	migrationMode = "migration"
+	NormalMode    = "normal"
+	DegradedMode  = "degraded"
+	MigrationMode = "migration"
 )
 
 type RecoveryHandler interface {
@@ -28,7 +27,7 @@ type RecoveryHandler interface {
 	Handle()
 }
 
-var CurrentMode string = normalMode // default mode
+var CurrentMode string = NormalMode // default mode
 
 // RecoveryDataT : DS to store the recovery process data
 type RecoveryDataT struct {
@@ -41,22 +40,10 @@ type RecoveryDataT struct {
 	Mode                            string
 }
 
-func getGatewayStoragePath() string {
-	return config.GetString("recovery.storagePathGateway", "/tmp/recovery_data_gateway.json")
-}
-
-func getProcessorStoragePath() string {
-	return config.GetString("recovery.storagePathProcessor", "/tmp/recovery_data_processor.json")
-}
-
-func getStoragePath() string {
-	return config.GetString("recovery.storagePath", "/tmp/recovery_data.json")
-}
-
-func getRecoveryData(storagePath string) RecoveryDataT {
+func GetRecoveryData(storagePath string) RecoveryDataT {
 	data, err := ioutil.ReadFile(storagePath)
 	if os.IsNotExist(err) {
-		defaultRecoveryJSON := "{\"mode\":\"" + normalMode + "\"}"
+		defaultRecoveryJSON := "{\"mode\":\"" + NormalMode + "\"}"
 		data = []byte(defaultRecoveryJSON)
 	} else {
 		if err != nil {
@@ -73,7 +60,7 @@ func getRecoveryData(storagePath string) RecoveryDataT {
 	return recoveryData
 }
 
-func saveRecoveryData(recoveryData RecoveryDataT, storagePath string) {
+func SaveRecoveryData(recoveryData RecoveryDataT, storagePath string) {
 	recoveryDataJSON, err := json.MarshalIndent(&recoveryData, "", " ")
 	err = ioutil.WriteFile(storagePath, recoveryDataJSON, 0644)
 	if err != nil {
@@ -83,7 +70,7 @@ func saveRecoveryData(recoveryData RecoveryDataT, storagePath string) {
 
 // IsNormalMode checks if the current mode is normal
 func IsNormalMode() bool {
-	return CurrentMode == normalMode
+	return CurrentMode == NormalMode
 }
 
 /*
@@ -110,25 +97,25 @@ func CheckOccurences(occurences []int64, numTimes int, numSecs int) (occurred bo
 	return
 }
 
-func getForceRecoveryMode(forceNormal bool, forceDegraded bool) string {
+func GetForceRecoveryMode(forceNormal bool, forceDegraded bool) string {
 	switch {
 	case forceNormal:
-		return normalMode
+		return NormalMode
 	case forceDegraded:
-		return degradedMode
+		return DegradedMode
 	}
 	return ""
 
 }
 
-func getNextMode(currentMode string) string {
+func GetNextMode(currentMode string) string {
 	switch currentMode {
-	case normalMode:
-		return degradedMode
-	case degradedMode:
+	case NormalMode:
+		return DegradedMode
+	case DegradedMode:
 		return ""
-	case migrationMode: //Staying in the migrationMode forever on repeated restarts.
-		return migrationMode
+	case MigrationMode: //Staying in the MigrationMode forever on repeated restarts.
+		return MigrationMode
 	}
 	return ""
 }
@@ -136,11 +123,11 @@ func getNextMode(currentMode string) string {
 func NewRecoveryHandler(recoveryData *RecoveryDataT) RecoveryHandler {
 	var recoveryHandler RecoveryHandler
 	switch recoveryData.Mode {
-	case normalMode:
+	case NormalMode:
 		recoveryHandler = &NormalModeHandler{recoveryData: recoveryData}
-	case degradedMode:
+	case DegradedMode:
 		recoveryHandler = &DegradedModeHandler{recoveryData: recoveryData}
-	case migrationMode:
+	case MigrationMode:
 		recoveryHandler = &MigrationModeHandler{recoveryData: recoveryData}
 	default:
 		panic("Invalid Recovery Mode " + recoveryData.Mode)
@@ -148,7 +135,7 @@ func NewRecoveryHandler(recoveryData *RecoveryDataT) RecoveryHandler {
 	return recoveryHandler
 }
 
-func alertOps(mode string) {
+func AlertOps(mode string) {
 	instanceName := config.GetEnv("INSTANCE_ID", "")
 
 	alertManager, err := alert.New()
@@ -160,145 +147,17 @@ func alertOps(mode string) {
 }
 
 // sendRecoveryModeStat sends the recovery mode metric every 10 seconds
-func sendRecoveryModeStat() {
+func SendRecoveryModeStat() {
 	recoveryModeStat := stats.NewStat("recovery.mode_normal", stats.GaugeType)
 	for {
 		time.Sleep(10 * time.Second)
 		switch CurrentMode {
-		case normalMode:
+		case NormalMode:
 			recoveryModeStat.Gauge(1)
-		case degradedMode:
+		case DegradedMode:
 			recoveryModeStat.Gauge(2)
-		case migrationMode:
+		case MigrationMode:
 			recoveryModeStat.Gauge(4)
 		}
 	}
-}
-
-// HandleOnlyProcessorRecovery decides the recovery Mode in which app should run based on earlier crashes
-func HandleOnlyProcessorRecovery(forceMigrationMode string, currTime int64) {
-	enabled := config.GetBool("recovery.enabled", false)
-	if !enabled {
-		return
-	}
-
-	var forceMode string
-
-	//If MIGRATION_MODE environment variable is present and is equal to "import", "export", "import-export", then server mode is forced to be Migration.
-	if IsValidMigrationMode(forceMigrationMode) {
-		logger.Info("Setting server mode to Migration. If this is not intended remove environment variables related to Migration.")
-		forceMode = migrationMode
-	}
-
-	recoveryData := getRecoveryData(getProcessorStoragePath())
-	if forceMode != "" {
-		recoveryData.Mode = forceMode
-	} else {
-		//If no mode is forced (through env or cli) and if previous mode is migration then setting server mode to normal.
-		if recoveryData.Mode != normalMode {
-			recoveryData.Mode = normalMode
-		}
-	}
-
-	recoveryHandler := NewRecoveryHandler(&recoveryData)
-
-	recoveryHandler.RecordAppStart(currTime)
-	saveRecoveryData(recoveryData, getProcessorStoragePath())
-	recoveryHandler.Handle()
-	logger.Infof("Starting in %s mode", recoveryData.Mode)
-	CurrentMode = recoveryData.Mode
-	rruntime.Go(func() {
-		sendRecoveryModeStat()
-	})
-}
-
-// HandleOnlyGatewayRecovery decides the recovery Mode in which app should run based on earlier crashes
-func HandleOnlyGatewayRecovery(forceMigrationMode string, currTime int64) {
-	enabled := config.GetBool("recovery.enabled", false)
-	if !enabled {
-		return
-	}
-
-	var forceMode string
-
-	//If MIGRATION_MODE environment variable is present and is equal to "import", "export", "import-export", then server mode is forced to be Migration.
-	if IsValidMigrationMode(forceMigrationMode) {
-		logger.Info("Setting server mode to Migration. If this is not intended remove environment variables related to Migration.")
-		forceMode = migrationMode
-	}
-
-	recoveryData := getRecoveryData(getGatewayStoragePath())
-	if forceMode != "" {
-		recoveryData.Mode = forceMode
-	} else {
-		//If no mode is forced (through env or cli) and if previous mode is migration then setting server mode to normal.
-		if recoveryData.Mode != normalMode {
-			recoveryData.Mode = normalMode
-		}
-	}
-
-	recoveryHandler := NewRecoveryHandler(&recoveryData)
-
-	recoveryHandler.RecordAppStart(currTime)
-	saveRecoveryData(recoveryData, getGatewayStoragePath())
-	recoveryHandler.Handle()
-	logger.Infof("Starting in %s mode", recoveryData.Mode)
-	CurrentMode = recoveryData.Mode
-	rruntime.Go(func() {
-		sendRecoveryModeStat()
-	})
-}
-
-// HandleRecovery decides the recovery Mode in which app should run based on earlier crashes
-func HandleRecovery(forceNormal bool, forceDegraded bool, forceMigrationMode string, currTime int64) {
-
-	enabled := config.GetBool("recovery.enabled", false)
-	if !enabled {
-		return
-	}
-
-	var forceMode string
-	isForced := false
-
-	//If MIGRATION_MODE environment variable is present and is equal to "import", "export", "import-export", then server mode is forced to be Migration.
-	if IsValidMigrationMode(forceMigrationMode) {
-		logger.Info("Setting server mode to Migration. If this is not intended remove environment variables related to Migration.")
-		forceMode = migrationMode
-	} else {
-		forceMode = getForceRecoveryMode(forceNormal, forceDegraded)
-	}
-
-	recoveryData := getRecoveryData(getStoragePath())
-	if forceMode != "" {
-		isForced = true
-		recoveryData.Mode = forceMode
-	} else {
-		//If no mode is forced (through env or cli) and if previous mode is migration then setting server mode to normal.
-		if recoveryData.Mode == migrationMode {
-			recoveryData.Mode = normalMode
-		}
-	}
-	recoveryHandler := NewRecoveryHandler(&recoveryData)
-
-	if !isForced && recoveryHandler.HasThresholdReached() {
-		logger.Info("DB Recovery: Moving to next State. Threshold reached for " + recoveryData.Mode)
-		nextMode := getNextMode(recoveryData.Mode)
-		if nextMode == "" {
-			logger.Fatal("Threshold reached for degraded mode")
-			panic("Not a valid mode")
-		} else {
-			recoveryData.Mode = nextMode
-			recoveryHandler = NewRecoveryHandler(&recoveryData)
-			alertOps(recoveryData.Mode)
-		}
-	}
-
-	recoveryHandler.RecordAppStart(currTime)
-	saveRecoveryData(recoveryData, getStoragePath())
-	recoveryHandler.Handle()
-	logger.Infof("Starting in %s mode", recoveryData.Mode)
-	CurrentMode = recoveryData.Mode
-	rruntime.Go(func() {
-		sendRecoveryModeStat()
-	})
 }
