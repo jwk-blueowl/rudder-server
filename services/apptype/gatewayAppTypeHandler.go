@@ -1,4 +1,4 @@
-package main
+package apptype
 
 import (
 	"errors"
@@ -8,11 +8,15 @@ import (
 
 	"github.com/rudderlabs/rudder-server/app"
 	"github.com/rudderlabs/rudder-server/config"
+	backendconfig "github.com/rudderlabs/rudder-server/config/backend-config"
+	"github.com/rudderlabs/rudder-server/gateway"
 	"github.com/rudderlabs/rudder-server/jobsdb"
+	ratelimiter "github.com/rudderlabs/rudder-server/rate-limiter"
 	"github.com/rudderlabs/rudder-server/rruntime"
 	"github.com/rudderlabs/rudder-server/services/db"
-	destinationdebugger "github.com/rudderlabs/rudder-server/services/destination-debugger"
 	"github.com/rudderlabs/rudder-server/services/diagnostics"
+	sourcedebugger "github.com/rudderlabs/rudder-server/services/source-debugger"
+	"github.com/rudderlabs/rudder-server/services/stats"
 	"github.com/rudderlabs/rudder-server/services/validators"
 	"github.com/rudderlabs/rudder-server/utils/logger"
 	"github.com/rudderlabs/rudder-server/utils/misc"
@@ -21,15 +25,15 @@ import (
 	_ "github.com/rudderlabs/rudder-server/imports"
 )
 
-//ProcessorAppType is the type for Processor type implemention
-type ProcessorAppType struct {
+//GatewayAppType is the type for Gateway type implemention
+type GatewayAppType struct {
 }
 
-func (processor *ProcessorAppType) GetAppType() string {
-	return "rudder-server-processor"
+func (gatewayApp *GatewayAppType) GetAppType() string {
+	return "rudder-server-gateway"
 }
 
-func (processor *ProcessorAppType) StartRudderCore(options *app.Options) {
+func (gatewayApp *GatewayAppType) StartRudderCore(options *app.Options) {
 	logger.Info("Main starting")
 
 	if !validators.ValidateEnv() {
@@ -48,47 +52,40 @@ func (processor *ProcessorAppType) StartRudderCore(options *app.Options) {
 	loadConfig()
 
 	var gatewayDB jobsdb.HandleT
-	var routerDB jobsdb.HandleT
-	var batchRouterDB jobsdb.HandleT
-	var procErrorDB jobsdb.HandleT
 
 	runtime.GOMAXPROCS(maxProcess)
 	logger.Info("Clearing DB ", options.ClearDB)
 
-	destinationdebugger.Setup()
+	sourcedebugger.Setup()
 
 	migrationMode := application.Options().MigrationMode
 	gatewayDB.Setup(options.ClearDB, "gw", gwDBRetention, migrationMode, false)
-	routerDB.Setup(options.ClearDB, "rt", routerDBRetention, migrationMode, true)
-	batchRouterDB.Setup(options.ClearDB, "batch_rt", routerDBRetention, migrationMode, true)
-	procErrorDB.Setup(options.ClearDB, "proc_error", routerDBRetention, migrationMode, false)
+
+	enableGateway := true
 
 	if application.Features().Migrator != nil {
 		if migrationMode == db.IMPORT || migrationMode == db.EXPORT || migrationMode == db.IMPORT_EXPORT {
-			startRouterFunc := func() {
-				StartRouter(enableRouter, &routerDB, &batchRouterDB)
-			}
-			startProcessorFunc := func() {
-				StartProcessor(enableProcessor, &gatewayDB, &routerDB, &batchRouterDB, &procErrorDB)
-			}
-			enableRouter = false
-			enableProcessor = false
-			application.Features().Migrator.Setup(&gatewayDB, &routerDB, &batchRouterDB, startProcessorFunc, startRouterFunc)
+			enableGateway = (migrationMode != db.EXPORT)
 		}
 	}
 
-	StartRouter(enableRouter, &routerDB, &batchRouterDB)
-	StartProcessor(enableProcessor, &gatewayDB, &routerDB, &batchRouterDB, &procErrorDB)
+	if enableGateway {
+		var gateway gateway.HandleT
+		var rateLimiter ratelimiter.HandleT
+
+		rateLimiter.SetUp()
+		gateway.Setup(application, backendconfig.DefaultBackendConfig, &gatewayDB, &rateLimiter, stats.DefaultStats, &options.ClearDB, versionHandler)
+		gateway.StartWebHandler()
+	}
 	//go readIOforResume(router) //keeping it as input from IO, to be replaced by UI
 }
 
-func (processor *ProcessorAppType) HandleRecovery(options *app.Options) {
-	fmt.Println("Processor handle recovery")
-
+func (gateway *GatewayAppType) HandleRecovery(options *app.Options) {
+	fmt.Println("gatway handle recovery")
 }
 
-// HandleOnlyProcessorRecovery decides the recovery Mode in which app should run based on earlier crashes
-func HandleOnlyProcessorRecovery(forceMigrationMode string, currTime int64) {
+// HandleOnlyGatewayRecovery decides the recovery Mode in which app should run based on earlier crashes
+func HandleOnlyGatewayRecovery(forceMigrationMode string, currTime int64) {
 	enabled := config.GetBool("recovery.enabled", false)
 	if !enabled {
 		return

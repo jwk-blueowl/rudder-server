@@ -25,6 +25,7 @@ import (
 	"github.com/rudderlabs/rudder-server/router"
 	"github.com/rudderlabs/rudder-server/router/batchrouter"
 	"github.com/rudderlabs/rudder-server/rruntime"
+	"github.com/rudderlabs/rudder-server/services/apptype"
 	"github.com/rudderlabs/rudder-server/services/stats"
 	"github.com/rudderlabs/rudder-server/utils"
 	"github.com/rudderlabs/rudder-server/utils/logger"
@@ -70,16 +71,19 @@ type AppTypeHandler interface {
 }
 
 func getAppType(appType string) AppTypeHandler {
+	var handler AppTypeHandler
 	switch appType {
 	case gatewayAppType:
-		return &GatewayAppType{}
+		handler = &apptype.GatewayAppType{}
 	case processorAppType:
-		return &ProcessorAppType{}
+		handler = &apptype.ProcessorAppType{}
 	case monolithAppType:
-		return &MonolithAppType{}
+		handler = &apptype.MonolithAppType{}
+	default:
+		panic(errors.New("invalid app type"))
 	}
 
-	panic(errors.New("invalid app type"))
+	return handler
 }
 
 func loadConfig() {
