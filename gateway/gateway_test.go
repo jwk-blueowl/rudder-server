@@ -253,7 +253,7 @@ var _ = Describe("Gateway Enterprise", func() {
 			c.expectWriteKeyStat("gateway.write_key_requests", WriteKeyEnabled, 1)
 			c.expectWriteKeyStat("gateway.write_key_events", WriteKeyEnabled, 1)
 			// Why GET
-			expectHandlerResponse(gateway.webBatchHandler, authorizedRequest(WriteKeyEnabled, bytes.NewBufferString(suppressedUserEventData)), 200, "OK")
+			expectHandlerResponse(gateway.webBatchHandler, authorizedRequest(WriteKeyEnabled, bytes.NewBufferString(suppressedUserEventData)), 200, response.MakeResponse("OK"))
 		})
 
 		It("should accept events from normal users", func() {
@@ -269,7 +269,7 @@ var _ = Describe("Gateway Enterprise", func() {
 			c.expectWriteKeyStat("gateway.write_key_events", WriteKeyEnabled, 1)
 			c.expectWriteKeyStat("gateway.write_key_successful_events", WriteKeyEnabled, 1)
 			// Why GET
-			expectHandlerResponse(gateway.webBatchHandler, authorizedRequest(WriteKeyEnabled, bytes.NewBufferString(allowedUserEventData)), 200, "OK")
+			expectHandlerResponse(gateway.webBatchHandler, authorizedRequest(WriteKeyEnabled, bytes.NewBufferString(allowedUserEventData)), 200, response.MakeResponse("OK"))
 		})
 	})
 
@@ -401,7 +401,7 @@ var _ = Describe("Gateway", func() {
 					}).
 					Times(1)
 
-				expectHandlerResponse(handler, authorizedRequest(WriteKeyEnabled, bytes.NewBuffer(validBody)), 200, "OK")
+				expectHandlerResponse(handler, authorizedRequest(WriteKeyEnabled, bytes.NewBuffer(validBody)), 200, response.MakeResponse("OK"))
 			})
 		}
 
@@ -522,7 +522,7 @@ var _ = Describe("Gateway", func() {
 			c.expectWriteKeyStat("gateway.write_key_events", WriteKeyEnabled, 1)
 			c.expectWriteKeyStat("gateway.write_key_successful_events", WriteKeyEnabled, 1)
 
-			expectHandlerResponse(gateway.webAliasHandler, authorizedRequest(WriteKeyEnabled, bytes.NewBufferString(`{"userId":"dummyId"}`)), 200, "OK")
+			expectHandlerResponse(gateway.webAliasHandler, authorizedRequest(WriteKeyEnabled, bytes.NewBufferString(`{"userId":"dummyId"}`)), 200, response.MakeResponse("OK"))
 		})
 
 		It("should reject messages if rate limit is reached for workspace", func() {
@@ -535,7 +535,7 @@ var _ = Describe("Gateway", func() {
 			c.expectWriteKeyStat("gateway.write_key_requests", WriteKeyEnabled, 1)
 			c.expectWriteKeyStat("gateway.work_space_dropped_requests", workspaceID, 1)
 
-			expectHandlerResponse(gateway.webAliasHandler, authorizedRequest(WriteKeyEnabled, bytes.NewBufferString("{}")), 400, response.TooManyRequests+"\n")
+			expectHandlerResponse(gateway.webAliasHandler, authorizedRequest(WriteKeyEnabled, bytes.NewBufferString("{}")), 400, response.MakeResponse(response.TooManyRequests)+"\n")
 		})
 	})
 
@@ -558,7 +558,7 @@ var _ = Describe("Gateway", func() {
 				c.expectWriteKeyStat("gateway.write_key_requests", "", 1)
 				c.expectWriteKeyStat("gateway.write_key_failed_requests", "noWriteKey", 1)
 
-				expectHandlerResponse(handler, unauthorizedRequest(nil), 400, response.NoWriteKeyInBasicAuth+"\n")
+				expectHandlerResponse(handler, unauthorizedRequest(nil), 400, response.MakeResponse(response.NoWriteKeyInBasicAuth)+"\n")
 			})
 
 			It("should reject requests without username in Authorization header", func() {
@@ -568,7 +568,7 @@ var _ = Describe("Gateway", func() {
 				c.expectWriteKeyStat("gateway.write_key_requests", "", 1)
 				c.expectWriteKeyStat("gateway.write_key_failed_requests", "noWriteKey", 1)
 
-				expectHandlerResponse(handler, authorizedRequest(WriteKeyEmpty, nil), 400, response.NoWriteKeyInBasicAuth+"\n")
+				expectHandlerResponse(handler, authorizedRequest(WriteKeyEmpty, nil), 400, response.MakeResponse(response.NoWriteKeyInBasicAuth)+"\n")
 			})
 
 			It("should reject requests with both userId and anonymousId not present", func() {
@@ -582,7 +582,7 @@ var _ = Describe("Gateway", func() {
 				c.expectWriteKeyStat("gateway.write_key_requests", WriteKeyEnabled, 1)
 				c.expectWriteKeyStat("gateway.write_key_failed_requests", "notIdentifiable", 1)
 				c.expectWriteKeyStat("gateway.write_key_events", WriteKeyEnabled, 1)
-				expectHandlerResponse(handler, authorizedRequest(WriteKeyEnabled, bytes.NewBufferString(validBody)), 400, response.NonIdentifiableRequest+"\n")
+				expectHandlerResponse(handler, authorizedRequest(WriteKeyEnabled, bytes.NewBufferString(validBody)), 400, response.MakeResponse(response.NonIdentifiableRequest)+"\n")
 			})
 
 			It("should reject requests without request body", func() {
@@ -591,7 +591,7 @@ var _ = Describe("Gateway", func() {
 
 				c.expectWriteKeyStat("gateway.write_key_requests", WriteKeyInvalid, 1)
 
-				expectHandlerResponse(handler, authorizedRequest(WriteKeyInvalid, nil), 400, response.RequestBodyNil+"\n")
+				expectHandlerResponse(handler, authorizedRequest(WriteKeyInvalid, nil), 400, response.MakeResponse(response.RequestBodyNil)+"\n")
 			})
 
 			It("should reject requests without valid json in request body", func() {
@@ -603,7 +603,7 @@ var _ = Describe("Gateway", func() {
 				c.expectWriteKeyStat("gateway.write_key_requests", WriteKeyInvalid, 1)
 				c.expectWriteKeyStat("gateway.write_key_failed_requests", WriteKeyInvalid, 1)
 
-				expectHandlerResponse(handler, authorizedRequest(WriteKeyInvalid, bytes.NewBufferString(invalidBody)), 400, response.InvalidJSON+"\n")
+				expectHandlerResponse(handler, authorizedRequest(WriteKeyInvalid, bytes.NewBufferString(invalidBody)), 400, response.MakeResponse(response.InvalidJSON)+"\n")
 			})
 
 			It("should reject requests with request bodies larger than configured limit", func() {
@@ -622,7 +622,7 @@ var _ = Describe("Gateway", func() {
 				c.expectWriteKeyStat("gateway.write_key_events", WriteKeyInvalid, 1)
 				c.expectWriteKeyStat("gateway.write_key_failed_events", WriteKeyInvalid, 1)
 
-				expectHandlerResponse(handler, authorizedRequest(WriteKeyInvalid, bytes.NewBufferString(body)), 400, response.RequestBodyTooLarge+"\n")
+				expectHandlerResponse(handler, authorizedRequest(WriteKeyInvalid, bytes.NewBufferString(body)), 400, response.MakeResponse(response.RequestBodyTooLarge)+"\n")
 			})
 
 			It("should reject requests with invalid write keys", func() {
@@ -637,7 +637,7 @@ var _ = Describe("Gateway", func() {
 				c.expectWriteKeyStat("gateway.write_key_events", WriteKeyInvalid, 1)
 				c.expectWriteKeyStat("gateway.write_key_failed_events", WriteKeyInvalid, 1)
 
-				expectHandlerResponse(handler, authorizedRequest(WriteKeyInvalid, bytes.NewBufferString(validBody)), 400, response.InvalidWriteKey+"\n")
+				expectHandlerResponse(handler, authorizedRequest(WriteKeyInvalid, bytes.NewBufferString(validBody)), 400, response.MakeResponse(response.InvalidWriteKey)+"\n")
 			})
 
 			It("should reject requests with disabled write keys", func() {
@@ -653,7 +653,7 @@ var _ = Describe("Gateway", func() {
 				c.expectWriteKeyStat("gateway.write_key_events", WriteKeyDisabled, 1)
 				c.expectWriteKeyStat("gateway.write_key_failed_events", WriteKeyDisabled, 1)
 
-				expectHandlerResponse(handler, authorizedRequest(WriteKeyDisabled, bytes.NewBufferString(validBody)), 400, response.InvalidWriteKey+"\n")
+				expectHandlerResponse(handler, authorizedRequest(WriteKeyDisabled, bytes.NewBufferString(validBody)), 400, response.MakeResponse(response.InvalidWriteKey)+"\n")
 			})
 		}
 
