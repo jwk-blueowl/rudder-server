@@ -2,6 +2,7 @@ package response
 
 import (
 	"encoding/json"
+	"github.com/rudderlabs/rudder-server/utils/logger"
 	"net/http"
 )
 
@@ -46,6 +47,7 @@ const (
 
 var (
 	statusMap map[string]ResponseStatus
+	pkgLogger logger.LoggerI
 )
 
 //ResponseStatus holds gateway response status Message and code
@@ -56,6 +58,7 @@ type ResponseStatus struct {
 
 func init() {
 	loadStatusMap()
+	pkgLogger = logger.NewLogger().Child("gateway").Child("api")
 }
 
 func loadStatusMap() {
@@ -100,15 +103,21 @@ func GetStatusCode(key string) int {
 //Always returns a valid response json
 func GetResponse(key string) string {
 	if status, ok := statusMap[key]; ok {
-		response, _ := json.Marshal(status)
+		response, err := json.Marshal(status)
+		if err != nil {
+			pkgLogger.Error("Error marshalling the API response status")
+			panic(err)
+		}
 		return string(response)
 	}
 	return "{}"
 }
 
 func MakeResponse(msg string) string {
-	resp, _ := json.Marshal(ResponseStatus{Message: msg})
-	//json.MarshalIndent(ResponseStatus{Message: msg},""," ")
-	//json.Marshal(ResponseStatus{Message: msg})
+	resp, err := json.Marshal(ResponseStatus{Message: msg})
+	if err != nil {
+		pkgLogger.Error("Error marshalling the API response status")
+		panic(err)
+	}
 	return string(resp)
 }
